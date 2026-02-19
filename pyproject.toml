@@ -1,0 +1,22 @@
+[project]
+name = "observer"
+version = "0.1.0"
+description = "Polymarket prediction market data collector"
+requires-python = ">=3.12"
+dependencies = [
+    "websockets>=13.0",
+    "aiohttp>=3.9",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+check_untyped_defs = true

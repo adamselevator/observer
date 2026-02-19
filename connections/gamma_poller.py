@@ -5,6 +5,7 @@ Polls periodically and on interval boundaries.
 """
 
 import asyncio
+import json
 import logging
 import re
 from typing import Optional
@@ -14,7 +15,8 @@ try:
 except ImportError:
     aiohttp = None
 
-from config import GAMMA_REST_URL, GAMMA_POLL_INTERVAL_S
+from clock import get_current_interval_start
+from config import GAMMA_REST_URL, GAMMA_POLL_INTERVAL_S, TIMEFRAME_SETTINGS, SSL_CONTEXT
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +85,9 @@ class GammaPoller:
     async def start(self):
         """Start polling loop."""
         self._running = True
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=SSL_CONTEXT)
+        )
 
         # Initial fetch
         await self._poll()
@@ -105,37 +109,47 @@ class GammaPoller:
         await self._poll()
 
     async def _poll(self):
-        """Fetch active crypto markets from Gamma API."""
+        """Discover markets by constructing expected slugs and querying directly."""
         if not self._session:
             return
 
+        for asset in self._assets:
+            for timeframe in self._timeframes:
+                duration = TIMEFRAME_SETTINGS[timeframe]["duration_s"]
+                current_start = get_current_interval_start(timeframe)
+
+                # Check current and next interval
+                for start_ts in (current_start, current_start + duration):
+                    slug = f"{asset}-updown-{timeframe}-{start_ts}"
+                    if slug in self._known_slugs:
+                        continue
+                    await self._fetch_by_slug(slug)
+
+    async def _fetch_by_slug(self, slug: str):
+        """Query Gamma API for a single event by slug."""
         try:
             url = f"{GAMMA_REST_URL}/events"
-            params = {
-                "tag": "crypto",
-                "active": "true",
-                "closed": "false",
-                "limit": "100",
-            }
+            params = {"slug": slug}
 
-            async with self._session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with self._session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
                 if resp.status != 200:
-                    logger.warning(
-                        f"[gamma] HTTP {resp.status} from {url}"
-                    )
+                    logger.warning(f"[gamma] HTTP {resp.status} querying {slug}")
                     return
 
                 events = await resp.json()
 
-            for event in events:
-                markets = event.get("markets", [])
-                for market in markets:
-                    self._process_market(market)
+            if not events:
+                return
+
+            for market in events[0].get("markets", []):
+                self._process_market(market)
 
         except asyncio.TimeoutError:
-            logger.warning("[gamma] Request timeout")
+            logger.warning(f"[gamma] Timeout querying {slug}")
         except Exception as e:
-            logger.error(f"[gamma] Poll error: {e}")
+            logger.error(f"[gamma] Poll error for {slug}: {e}")
 
     def _process_market(self, market: dict):
         """Parse a market object and emit if it's new and relevant."""
@@ -162,11 +176,16 @@ class GammaPoller:
         if timeframe not in self._timeframes:
             return
 
-        # Extract token IDs
-        clob_token_ids = market.get("clobTokenIds", [])
+        # Extract token IDs (both fields are JSON-encoded strings)
+        clob_token_ids = market.get("clobTokenIds", "[]")
+        if isinstance(clob_token_ids, str):
+            try:
+                clob_token_ids = json.loads(clob_token_ids)
+            except (json.JSONDecodeError, TypeError):
+                clob_token_ids = []
+
         outcomes = market.get("outcomes", "[]")
         if isinstance(outcomes, str):
-            import json
             try:
                 outcomes = json.loads(outcomes)
             except (json.JSONDecodeError, TypeError):
@@ -265,7 +284,6 @@ class GammaPoller:
             if market.get("closed"):
                 outcome_prices = market.get("outcomePrices", "")
                 if isinstance(outcome_prices, str):
-                    import json
                     try:
                         outcome_prices = json.loads(outcome_prices)
                     except (json.JSONDecodeError, TypeError):

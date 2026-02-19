@@ -3,10 +3,10 @@ Observer main entry point.
 Orchestrates WebSocket connections, state management, and data writing.
 
 Usage:
-    python observer.py                          # All assets, all timeframes
-    python observer.py --asset btc,eth          # Specific assets
-    python observer.py --timeframe 5m           # Specific timeframe
-    python observer.py --asset btc --timeframe 5m  # Both filters
+    python3 main.py                          # All assets, all timeframes
+    python3 main.py --asset btc,eth          # Specific assets
+    python3 main.py --timeframe 5m           # Specific timeframe
+    python3 main.py --asset btc --timeframe 5m  # Both filters
 """
 
 import asyncio
@@ -73,10 +73,12 @@ class Observer:
     def __init__(self, config: ObserverConfig):
         self.config = config
         self._running = False
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         # ── State ──
         self.market_state = MarketState(config.assets)
         self.interval_tracker = IntervalTracker(config.asset_timeframe_pairs)
+        self._discovered_markets: dict[str, object] = {}  # interval_id → MarketInfo
 
         # ── Writers ──
         self.snapshot_writer = SnapshotWriter(
@@ -104,6 +106,7 @@ class Observer:
         )
         self.clob_ws = ClobWS(
             on_book_update=self._on_book_update,
+            on_level_update=self._on_level_update,
             on_price_snap=self._on_price_snap,
         )
         self.gamma = GammaPoller(
@@ -143,65 +146,50 @@ class Observer:
         self._binance_last_tick[asset] = time.time()
 
     def _on_book_update(self, token_id: str, bids: list[dict], asks: list[dict]):
-        """Handle incoming order book update from CLOB."""
+        """Handle full book snapshot from CLOB."""
         bid_levels = [BookLevel(price=b["price"], size=b["size"]) for b in bids]
         ask_levels = [BookLevel(price=a["price"], size=a["size"]) for a in asks]
         self.market_state.update_book(token_id, bid_levels, ask_levels)
 
+    def _on_level_update(self, token_id: str, side: str, price: float, size: float):
+        """Handle incremental level change from CLOB (price_change event)."""
+        self.market_state.update_book_level(token_id, side, price, size)
+
     def _on_price_snap(self, token_id: str, price: float):
         """Detect market resolution from token price snapping to 0 or 1."""
-        # Find which interval this token belongs to
-        for state in self.market_state.all_assets():
-            for tf, tid in state.up_token_ids.items():
-                if tid == token_id:
-                    interval_id = None
-                    record = self.interval_tracker.get_active(state.asset, tf)
-                    if record and record.up_token_id == token_id:
-                        interval_id = record.interval_id
-                    else:
-                        # Check pending
-                        for iid, rec in self.interval_tracker._pending.items():
-                            if rec.up_token_id == token_id:
-                                interval_id = iid
-                                break
+        # Only resolve pending intervals (active intervals end at their boundary)
+        interval_id = self.interval_tracker.find_pending_by_token(token_id)
+        if not interval_id:
+            return
 
-                    if interval_id:
-                        resolution = "up" if price >= 0.99 else "down"
-                        self.interval_tracker.resolve_interval(
-                            interval_id, resolution
-                        )
-                    return
-
-            for tf, tid in state.down_token_ids.items():
-                if tid == token_id:
-                    interval_id = None
-                    record = self.interval_tracker.get_active(state.asset, tf)
-                    if record and record.down_token_id == token_id:
-                        interval_id = record.interval_id
-                    else:
-                        for iid, rec in self.interval_tracker._pending.items():
-                            if rec.down_token_id == token_id:
-                                interval_id = iid
-                                break
-
-                    if interval_id:
-                        resolution = "down" if price >= 0.99 else "up"
-                        self.interval_tracker.resolve_interval(
-                            interval_id, resolution
-                        )
-                    return
+        resolution = "up" if price >= 0.95 else "down"
+        self.interval_tracker.resolve_interval(interval_id, resolution)
 
     def _on_market_found(self, market_info):
         """Handle new market discovered by Gamma poller."""
-        # Update market state with token IDs
+        # Store for later use when interval transitions
+        self._discovered_markets[market_info.interval_id] = market_info
+
+        # Only apply token IDs if this is the current active interval
+        current_start = get_current_interval_start(market_info.timeframe)
+        if market_info.start_ts == current_start:
+            self._apply_market_tokens(market_info)
+
+        # Subscribe CLOB to new tokens regardless (pre-warm for future interval)
+        self._loop.create_task(
+            self.clob_ws.subscribe_markets(
+                [market_info.up_token_id, market_info.down_token_id]
+            )
+        )
+
+    def _apply_market_tokens(self, market_info):
+        """Set token IDs on AssetState and IntervalTracker for the active interval."""
         state = self.market_state.get(market_info.asset)
         state.set_token_ids(
             market_info.timeframe,
             market_info.up_token_id,
             market_info.down_token_id,
         )
-
-        # Update interval tracker
         self.interval_tracker.set_token_ids(
             market_info.asset,
             market_info.timeframe,
@@ -209,12 +197,14 @@ class Observer:
             market_info.down_token_id,
         )
 
-        # Subscribe CLOB to new tokens (schedule as task since this is sync callback)
-        asyncio.get_event_loop().create_task(
-            self.clob_ws.subscribe_markets(
-                [market_info.up_token_id, market_info.down_token_id]
-            )
-        )
+    def _sync_active_tokens(self):
+        """Apply stored market tokens to newly-active intervals."""
+        for asset, timeframe in self.config.asset_timeframe_pairs:
+            record = self.interval_tracker.get_active(asset, timeframe)
+            if record and not record.up_token_id:
+                market_info = self._discovered_markets.get(record.interval_id)
+                if market_info:
+                    self._apply_market_tokens(market_info)
 
     # ── Main loops ─────────────────────────────────────────────────────────
 
@@ -228,6 +218,9 @@ class Observer:
 
                 # Check interval boundaries
                 self.interval_tracker.check_boundaries(now)
+
+                # Apply token IDs for any newly-active intervals
+                self._sync_active_tokens()
 
                 # Write snapshots
                 self.snapshot_writer.write_snapshot(
@@ -263,12 +256,9 @@ class Observer:
                 # Check pending intervals via Gamma API
                 pending = self.interval_tracker.get_pending_intervals()
                 for record in pending:
-                    slug = record.interval_id.replace(
-                        f"{record.asset}-updown-{record.timeframe}-",
-                        f"{record.asset}-updown-{record.timeframe}-",
+                    resolution = await self.gamma.check_resolution(
+                        record.interval_id
                     )
-                    # Try to check resolution
-                    resolution = await self.gamma.check_resolution(slug)
                     if resolution:
                         self.interval_tracker.resolve_interval(
                             record.interval_id, resolution
@@ -344,6 +334,7 @@ class Observer:
     async def start(self):
         """Start all components and run until stopped."""
         self._running = True
+        self._loop = asyncio.get_running_loop()
 
         logger.info("=" * 60)
         logger.info("Polymarket Observer starting")

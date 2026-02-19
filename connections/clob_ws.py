@@ -16,11 +16,15 @@ logger = logging.getLogger(__name__)
 class ClobWS(BaseWebSocket):
     """Connects to Polymarket CLOB WebSocket for order book data."""
 
-    def __init__(self, on_book_update=None, on_price_snap=None):
+    def __init__(self, on_book_update=None, on_level_update=None, on_price_snap=None):
         """
         Args:
             on_book_update: callback(token_id, bids, asks)
-                bids/asks are lists of {"price": str, "size": str}
+                bids/asks are lists of {"price": float, "size": float}
+                Called on full book snapshots.
+            on_level_update: callback(token_id, side, price, size)
+                Called on individual level changes (price_change events).
+                side is "BUY" or "SELL", size 0 means remove.
             on_price_snap: callback(token_id, price)
                 Called when a token snaps to 0 or 1 (resolution detection)
         """
@@ -30,6 +34,7 @@ class ClobWS(BaseWebSocket):
             staleness_timeout_s=CLOB_STALENESS_TIMEOUT_S,
         )
         self._on_book_update = on_book_update
+        self._on_level_update = on_level_update
         self._on_price_snap = on_price_snap
         self._subscribed_markets: set[str] = set()  # condition IDs / asset IDs
         self._pending_subscriptions: list[str] = []
@@ -40,48 +45,92 @@ class ClobWS(BaseWebSocket):
             await self._send_subscription(list(self._subscribed_markets))
 
     async def _on_message(self, raw: str):
-        """Parse CLOB book update."""
+        """Parse CLOB message (book snapshot, price change, or trade)."""
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
             return
 
+        if not isinstance(msg, dict):
+            return
+
         event_type = msg.get("event_type")
 
         if event_type == "book":
-            asset_id = msg.get("asset_id", "")
-            bids_raw = msg.get("bids", [])
-            asks_raw = msg.get("sells", msg.get("asks", []))
+            self._handle_book(msg)
+        elif event_type == "price_change" or "price_changes" in msg:
+            self._handle_price_changes(msg)
+        elif event_type == "last_trade_price":
+            pass
+        elif event_type == "tick_size_change":
+            pass
 
-            bids = [
-                {"price": float(b["price"]), "size": float(b["size"])}
-                for b in bids_raw
-            ]
-            asks = [
-                {"price": float(a["price"]), "size": float(a["size"])}
-                for a in asks_raw
-            ]
+    def _handle_book(self, msg: dict):
+        """Process a full book snapshot."""
+        asset_id = msg.get("asset_id", "")
+        bids_raw = msg.get("bids", [])
+        asks_raw = msg.get("asks", msg.get("sells", []))
 
-            if self._on_book_update:
+        bids = [
+            {"price": float(b["price"]), "size": float(b["size"])}
+            for b in bids_raw
+        ]
+        asks = [
+            {"price": float(a["price"]), "size": float(a["size"])}
+            for a in asks_raw
+        ]
+
+        # Sort: bids descending (best/highest first), asks ascending (best/lowest first)
+        bids.sort(key=lambda b: b["price"], reverse=True)
+        asks.sort(key=lambda a: a["price"])
+
+        if self._on_book_update:
+            try:
+                self._on_book_update(asset_id, bids, asks)
+            except Exception as e:
+                logger.error(f"[{self.name}] Book callback error: {e}")
+
+        # Resolution detection from book snapshot
+        if bids and self._on_price_snap:
+            best_bid = bids[0]["price"]  # highest bid after sorting
+            if best_bid >= 0.95 or best_bid < 0.01:
                 try:
-                    self._on_book_update(asset_id, bids, asks)
+                    self._on_price_snap(asset_id, best_bid)
                 except Exception as e:
-                    logger.error(f"[{self.name}] Book callback error: {e}")
+                    logger.error(f"[{self.name}] Price snap callback error: {e}")
 
-            # Resolution detection: if best bid snaps to >= 0.99 or <= 0.01
-            if bids and self._on_price_snap:
-                best_bid = float(bids[0]["price"]) if bids else 0.5
-                if best_bid >= 0.99 or best_bid <= 0.01:
+    def _handle_price_changes(self, msg: dict):
+        """Process incremental level changes (price_changes array)."""
+        changes = msg.get("price_changes", [])
+
+        for change in changes:
+            asset_id = change.get("asset_id", "")
+            side = change.get("side", "").upper()
+            price_str = change.get("price", "")
+            size_str = change.get("size", "0")
+
+            if not (asset_id and side and price_str):
+                continue
+
+            try:
+                price = float(price_str)
+                size = float(size_str)
+            except (ValueError, TypeError):
+                continue
+
+            if self._on_level_update:
+                try:
+                    self._on_level_update(asset_id, side, price, size)
+                except Exception as e:
+                    logger.error(f"[{self.name}] Level update callback error: {e}")
+
+            # Resolution detection from level update
+            if self._on_price_snap and side == "BUY":
+                if price >= 0.95 or price < 0.01:
                     try:
-                        self._on_price_snap(asset_id, best_bid)
+                        self._on_price_snap(asset_id, price)
                     except Exception as e:
                         logger.error(f"[{self.name}] Price snap callback error: {e}")
-
-        elif event_type == "tick_size_change":
-            pass  # Ignore
-        elif event_type == "last_trade_price":
-            # Could track last trade price too
-            pass
 
     async def subscribe_markets(self, asset_ids: list[str]):
         """Subscribe to book updates for new market tokens."""

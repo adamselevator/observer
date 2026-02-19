@@ -346,6 +346,13 @@ class IntervalTracker:
                 except Exception as e:
                     logger.error(f"resolution callback error: {e}")
 
+    def find_pending_by_token(self, token_id: str) -> str | None:
+        """Find a pending interval ID by its up or down token ID."""
+        for iid, rec in self._pending.items():
+            if rec.up_token_id == token_id or rec.down_token_id == token_id:
+                return iid
+        return None
+
     def set_token_ids(
         self, asset: str, timeframe: str, up_token_id: str, down_token_id: str
     ):

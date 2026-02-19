@@ -8,13 +8,15 @@ import logging
 import time
 from abc import ABC, abstractmethod
 
-from config import WS_RECONNECT_BASE_S, WS_RECONNECT_MAX_S
+from config import WS_RECONNECT_BASE_S, WS_RECONNECT_MAX_S, SSL_CONTEXT
 
 try:
     import websockets
+    from websockets import State as WsState
     from websockets.asyncio.client import connect as ws_connect
 except ImportError:
     websockets = None
+    WsState = None
     ws_connect = None
 
 logger = logging.getLogger(__name__)
@@ -54,7 +56,7 @@ class BaseWebSocket(ABC):
 
     @property
     def is_connected(self) -> bool:
-        return self._ws is not None and self._ws.open
+        return self._ws is not None and self._ws.state is WsState.OPEN
 
     @property
     def last_message_age_ms(self) -> int:
@@ -83,7 +85,7 @@ class BaseWebSocket(ABC):
                 logger.info(f"[{self.name}] Connecting to {self.url}")
                 self._emit_health("connecting", {"url": self.url})
 
-                async with ws_connect(self.url, ping_interval=20, ping_timeout=10) as ws:
+                async with ws_connect(self.url, ping_interval=20, ping_timeout=10, ssl=SSL_CONTEXT) as ws:
                     self._ws = ws
                     self._connect_count += 1
                     backoff = WS_RECONNECT_BASE_S

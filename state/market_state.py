@@ -33,7 +33,11 @@ class BookLevel:
 
 @dataclass
 class TokenBook:
-    """Order book for one outcome token (Up or Down)."""
+    """Order book for one outcome token (Up or Down).
+
+    Supports both full snapshots (replace) and incremental updates (merge).
+    Bids are sorted descending by price, asks ascending.
+    """
 
     bids: list[BookLevel] = field(default_factory=list)
     asks: list[BookLevel] = field(default_factory=list)
@@ -68,6 +72,54 @@ class TokenBook:
         ask_sizes.extend([0.0] * (n - len(ask_sizes)))
         return bid_sizes, ask_sizes
 
+    def apply_level(self, side: str, price: float, size: float):
+        """Merge a single level update into the book.
+
+        Args:
+            side: "BUY" for bids, "SELL" for asks
+            price: Price level
+            size: New size (0 = remove the level)
+        """
+        if side == "BUY":
+            self._merge_level(self.bids, price, size, reverse=True)
+        else:
+            self._merge_level(self.asks, price, size, reverse=False)
+        self.last_update = time.time()
+
+    def _merge_level(
+        self, levels: list[BookLevel], price: float, size: float, reverse: bool
+    ):
+        """Insert, update, or remove a price level in a sorted list."""
+        # Find existing level at this price
+        for i, level in enumerate(levels):
+            if level.price == price:
+                if size == 0:
+                    levels.pop(i)
+                else:
+                    levels[i] = BookLevel(price=price, size=size)
+                return
+
+        # Not found — insert in sorted position (skip if size 0)
+        if size == 0:
+            return
+
+        new_level = BookLevel(price=price, size=size)
+        # Bids: descending (highest first). Asks: ascending (lowest first).
+        for i, level in enumerate(levels):
+            if reverse and price > level.price:
+                levels.insert(i, new_level)
+                return
+            if not reverse and price < level.price:
+                levels.insert(i, new_level)
+                return
+        levels.append(new_level)
+
+    def reset(self):
+        """Clear all levels. Called on token ID change."""
+        self.bids.clear()
+        self.asks.clear()
+        self.last_update = 0.0
+
 
 @dataclass
 class AssetState:
@@ -90,9 +142,8 @@ class AssetState:
         self.binance = PriceTick(price=price, timestamp_ms=timestamp_ms)
 
     def update_book(self, token_id: str, bids: list[BookLevel], asks: list[BookLevel]):
-        """Update the order book for a token. Matches token_id to up/down."""
+        """Replace the full order book for a token (snapshot). Matches token_id to up/down."""
         book = TokenBook(bids=bids, asks=asks, last_update=time.time())
-        # Check across all timeframes which side this token belongs to
         for tf, tid in self.up_token_ids.items():
             if tid == token_id:
                 self.up_book = book
@@ -102,7 +153,25 @@ class AssetState:
                 self.down_book = book
                 return
 
+    def update_book_level(self, token_id: str, side: str, price: float, size: float):
+        """Merge a single level change into the book for a token."""
+        for tf, tid in self.up_token_ids.items():
+            if tid == token_id:
+                self.up_book.apply_level(side, price, size)
+                return
+        for tf, tid in self.down_token_ids.items():
+            if tid == token_id:
+                self.down_book.apply_level(side, price, size)
+                return
+
     def set_token_ids(self, timeframe: str, up_id: str, down_id: str):
+        # Reset books when tokens change — new tokens have a fresh order book
+        old_up = self.up_token_ids.get(timeframe)
+        old_down = self.down_token_ids.get(timeframe)
+        if up_id != old_up:
+            self.up_book.reset()
+        if down_id != old_down:
+            self.down_book.reset()
         self.up_token_ids[timeframe] = up_id
         self.down_token_ids[timeframe] = down_id
 
@@ -152,9 +221,17 @@ class MarketState:
             self._states[asset].update_binance(price, timestamp_ms)
 
     def update_book(self, token_id: str, bids: list[BookLevel], asks: list[BookLevel]):
-        """Route book update to the correct asset by token ID."""
+        """Route full book snapshot to the correct asset by token ID."""
         for state in self._states.values():
             all_ids = state.get_all_token_ids()
             if token_id in all_ids:
                 state.update_book(token_id, bids, asks)
+                return
+
+    def update_book_level(self, token_id: str, side: str, price: float, size: float):
+        """Route a single level change to the correct asset by token ID."""
+        for state in self._states.values():
+            all_ids = state.get_all_token_ids()
+            if token_id in all_ids:
+                state.update_book_level(token_id, side, price, size)
                 return

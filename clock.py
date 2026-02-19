@@ -77,8 +77,7 @@ def get_interval_info(timeframe: str, ts: float | None = None) -> IntervalInfo:
 
 def make_interval_id(asset: str, timeframe: str, start_ts: int) -> str:
     """Construct a Polymarket-style interval identifier."""
-    tf_label = timeframe.replace("m", "m")
-    return f"{asset}-updown-{tf_label}-{start_ts}"
+    return f"{asset}-updown-{timeframe}-{start_ts}"
 
 
 def parse_interval_id(interval_id: str) -> tuple[str, str, int]:

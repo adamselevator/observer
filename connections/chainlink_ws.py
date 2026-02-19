@@ -46,6 +46,9 @@ class ChainlinkWS(BaseWebSocket):
 
     async def _on_message(self, raw: str):
         """Parse Chainlink price update and route to callback."""
+        if not raw or not raw.strip():
+            return
+
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:

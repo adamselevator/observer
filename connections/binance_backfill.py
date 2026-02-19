@@ -11,7 +11,7 @@ try:
 except ImportError:
     aiohttp = None
 
-from config import BINANCE_REST_URL, BACKFILL_MAX_GAP_S
+from config import BINANCE_REST_URL, BACKFILL_MAX_GAP_S, SSL_CONTEXT
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,9 @@ class BinanceBackfill:
         self._session: aiohttp.ClientSession | None = None
 
     async def start(self):
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=SSL_CONTEXT)
+        )
 
     async def stop(self):
         if self._session:

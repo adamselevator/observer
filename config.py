@@ -4,10 +4,11 @@ All tunable parameters in one place. No magic numbers in code.
 """
 
 import argparse
-import json
+import ssl
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+
+import certifi
 
 
 # ── Asset / timeframe definitions ──────────────────────────────────────────
@@ -65,10 +66,14 @@ BINANCE_REST_URL = "https://api.binance.com"
 # ── Connection resilience ──────────────────────────────────────────────────
 
 WS_RECONNECT_BASE_S = 1
-WS_RECONNECT_MAX_S = 30
+WS_RECONNECT_MAX_S = 10
 CHAINLINK_STALENESS_TIMEOUT_S = 5
 BINANCE_STALENESS_TIMEOUT_S = 3
 CLOB_STALENESS_TIMEOUT_S = 10
+
+# ── SSL ───────────────────────────────────────────────────────────────────
+
+SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 # ── Volatility ─────────────────────────────────────────────────────────────
 
