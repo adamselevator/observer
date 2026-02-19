@@ -117,7 +117,7 @@ The Observer runs as one Python process with three WebSocket connections:
    - Calls `IntervalTracker.check_boundaries()` — detects if any interval ended or started
    - If boundary crossed: closes old interval (captures close price, computes basis, moves to pending resolution queue), starts new interval
    - Calls `SnapshotWriter.write_snapshot()` — reads current `MarketState` and `IntervalTracker`, writes one CSV row per active (asset, timeframe) pair
-3. **Book update arrives** (CLOB WebSocket) → updates `MarketState.up_book` or `down_book` for the relevant asset
+3. **Book update arrives** (CLOB WebSocket) → updates `MarketState.up_book` or `down_book` for the relevant asset. Full snapshots (`book` events) replace the entire book; incremental level changes (`price_change` events) merge into the existing book via sorted insert/update/remove
 
 ### Interval Lifecycle
 
@@ -154,7 +154,7 @@ observer/
 ├── config.py                     # All constants, CLI parsing, ObserverConfig
 ├── clock.py                      # Interval timing, boundary detection
 ├── health.py                     # Connection health event logging
-├── requirements.txt              # websockets, aiohttp
+├── requirements.txt              # websockets, aiohttp, certifi
 ├── connections/
 │   ├── base_ws.py                # Abstract WebSocket with reconnect + staleness
 │   ├── chainlink_ws.py           # Polymarket RTDS Chainlink stream
@@ -177,12 +177,12 @@ observer/
 ### CLI Flags
 
 ```bash
-python main.py                              # All assets, all timeframes
-python main.py --asset btc                  # BTC only (both 5m and 15m)
-python main.py --asset btc,eth              # BTC and ETH
-python main.py --timeframe 15m             # 15-minute markets only (all assets)
-python main.py --asset btc --timeframe 5m  # BTC 5-minute only
-python main.py --data-dir /path/to/data    # Custom output directory
+python3 main.py                              # All assets, all timeframes
+python3 main.py --asset btc                  # BTC only (both 5m and 15m)
+python3 main.py --asset btc,eth              # BTC and ETH
+python3 main.py --timeframe 15m             # 15-minute markets only (all assets)
+python3 main.py --asset btc --timeframe 5m  # BTC 5-minute only
+python3 main.py --data-dir /path/to/data    # Custom output directory
 ```
 
 The CLI validates combinations. If you specify `--asset eth --timeframe 5m`, it exits with an error because ETH doesn't have 5-minute markets.
@@ -231,7 +231,7 @@ TIMEFRAME_SETTINGS = {
 | `RESOLUTION_TIMEOUT_S` | 600 | Mark unresolved after 10 minutes |
 | `VOL_LOOKBACK_INTERVALS` | 20 | Number of historical deltas for realized vol |
 | `WS_RECONNECT_BASE_S` | 1 | Initial reconnect backoff |
-| `WS_RECONNECT_MAX_S` | 30 | Maximum reconnect backoff |
+| `WS_RECONNECT_MAX_S` | 10 | Maximum reconnect backoff |
 | `CHAINLINK_STALENESS_TIMEOUT_S` | 5 | Force reconnect if no Chainlink tick for 5s |
 | `BINANCE_STALENESS_TIMEOUT_S` | 3 | Force reconnect if no Binance tick for 3s |
 | `CLOB_STALENESS_TIMEOUT_S` | 10 | Force reconnect if no CLOB message for 10s |
@@ -438,6 +438,8 @@ Update frequency is approximately once per second. This is Polymarket's relay of
 
 **Known issue**: GitHub issue #31 on Polymarket's `real-time-data-client` repo documents that this feed sometimes drops ticks. The reporter observed 8-second gaps in what should be per-second data. The Binance feed was continuous during the same gaps. No fix or workaround was provided by Polymarket. This is the primary reliability concern for the Observer.
 
+**Known issue**: The first WebSocket message after connect is sometimes empty or whitespace. The Observer skips empty messages before attempting JSON parsing.
+
 **Why this is the primary source**: Polymarket settles 5-min and 15-min markets against Chainlink prices. Using any other source for delta calculation introduces basis risk — the spread between feeds can flip the outcome on tight moves.
 
 ### Binance WebSocket (Secondary Price Source)
@@ -483,34 +485,61 @@ Fires dozens of times per second per symbol. Used for:
 
 Note: the field is `assets_ids` (plural with underscore), not `asset_ids`.
 
-**Incoming book update format**:
+**Event types**:
+
+The CLOB WebSocket sends three event types. Approximately 75% of messages are `price_change` (incremental level updates), 15% are `book` (full snapshots), and 10% are `last_trade_price` (ignored).
+
+**Full book snapshot** (`book` event):
 ```json
 {
   "event_type": "book",
   "asset_id": "0x1234...",
   "bids": [{"price": "0.72", "size": "500"}],
-  "sells": [{"price": "0.74", "size": "300"}]
+  "asks": [{"price": "0.74", "size": "300"}]
 }
 ```
 
-Note: asks may appear as `"sells"` or `"asks"` depending on the message.
+Note: asks may appear as `"sells"` or `"asks"` depending on the message. Bids arrive sorted ascending (lowest first) — the Observer re-sorts bids descending (highest/best first) and asks ascending (lowest/best first) after parsing.
 
-**Resolution detection**: When a token's best bid snaps to ≥$0.99 or ≤$0.01, the market has likely settled. The Observer uses this as a fast-path resolution signal.
+**Incremental level update** (`price_change` event):
+```json
+{
+  "event_type": "price_change",
+  "price_changes": [
+    {
+      "asset_id": "0x1234...",
+      "side": "BUY",
+      "price": "0.72",
+      "size": "600"
+    }
+  ]
+}
+```
+
+The `price_changes` array contains one or more per-token level changes. Each change specifies a side (`BUY` for bids, `SELL` for asks), a price level, and the new size at that level. A size of `"0"` means the level should be removed from the book. The Observer merges these into the running `TokenBook` via sorted insert, in-place update, or removal.
+
+Some CLOB messages are arrays (not dicts) — the Observer guards against this with an `isinstance(msg, dict)` check before processing.
+
+**Resolution detection**: When a token's best bid snaps to ≥$0.95 or <$0.01, the market has likely settled. The Observer uses this as a fast-path resolution signal for pending intervals only (active intervals end at their time boundary regardless of price).
 
 **No backfill available**: If the CLOB connection drops, there is no way to recover historical order book snapshots. Rows during the outage will have `book_source: "missing"` and empty book columns.
 
 ### Gamma REST API (Market Discovery)
 
-**Endpoint**: `GET https://gamma-api.polymarket.com/events?tag=crypto&active=true&closed=false&limit=100`
+**Endpoint**: `GET https://gamma-api.polymarket.com/events?slug=<slug>`
 **Authentication**: None required
+
+The Observer constructs expected slugs directly (`{asset}-updown-{tf}-{start_ts}`) and queries for the current and next interval. This replaced an earlier tag-based approach (`?tag=crypto&tag=up-or-down`) which returned no results for up-down markets.
 
 Returns event objects containing nested market objects. Each market has:
 - `slug`: e.g., `"btc-updown-15m-1739836800"` — parsed via regex to extract asset, timeframe, and Unix start timestamp
-- `clobTokenIds`: Array of token IDs (used for CLOB subscription)
+- `clobTokenIds`: **JSON-encoded string** (not a native array) — e.g., `"[\"0x1234...\",\"0x5678...\"]"`. Requires `json.loads()` to deserialize into a list of token IDs
 - `outcomes`: Array like `["Up", "Down"]` — mapped to token IDs by position
 - `outcomePrices`: Current prices (used for resolution checking)
 
 **Polling strategy**: Every 30 seconds continuously, plus an extra poll 5 seconds after each interval boundary (when new markets are expected to appear).
+
+**Token ID lifecycle**: When GammaPoller discovers a future interval's market, the token IDs are stored in `_discovered_markets` but not immediately applied to `AssetState`. Token IDs are only applied when the interval becomes active (via `_sync_active_tokens()`), preventing stale book data from overwriting the current interval's tokens.
 
 **Resolution checking**: `GET https://gamma-api.polymarket.com/markets?slug=<slug>` — checks if `closed: true` and reads `outcomePrices` to determine winner.
 
@@ -532,7 +561,7 @@ Used for two purposes:
 
 Every WebSocket connection inherits from `BaseWebSocket`, which provides:
 
-**Auto-reconnect with exponential backoff**: Starts at 1 second, doubles each attempt, caps at 30 seconds. Resets to 1 second on successful connection. Runs indefinitely until `stop()` is called.
+**Auto-reconnect with exponential backoff**: Starts at 1 second, doubles each attempt, caps at 10 seconds. Resets to 1 second on successful connection. Runs indefinitely until `stop()` is called.
 
 **Staleness watchdog**: Each connection has a staleness timeout. If no message is received within the timeout window, the connection is forcibly closed and reconnected. This catches silent failures where the TCP socket stays open but the server stops sending data.
 
@@ -541,6 +570,8 @@ Every WebSocket connection inherits from `BaseWebSocket`, which provides:
 | Chainlink RTDS | 5 seconds |
 | Binance WS | 3 seconds |
 | CLOB WS | 10 seconds |
+
+**SSL context**: All connections (WebSocket and aiohttp) use a shared `SSL_CONTEXT` created with `certifi`'s CA bundle. This is required on macOS Homebrew Python, which lacks system CA certificates. The SSL context is created once in `config.py` and imported by all connection modules.
 
 **Health event emission**: Every connect, disconnect, stale detection, reconnect, and error emits a health event to the `HealthMonitor`, which writes it to the daily health JSONL.
 

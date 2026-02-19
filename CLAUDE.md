@@ -72,4 +72,5 @@ All WebSocket clients inherit from **BaseWebSocket** (`base_ws.py`) which provid
 - Triple-quoted docstrings on classes and public methods
 - All config constants and endpoints live in `config.py` — no magic numbers elsewhere
 - `pyproject.toml` configures ruff (line-length 99, rules E/F/W/I) and mypy but neither is enforced in CI yet
-- Always update `CHANGELOG.md` when making functional changes (bug fixes, new features, behavior changes). Group by date, describe what changed and why, list affected files
+- Always update `docs/CHANGELOG.md` when making functional changes (bug fixes, new features, behavior changes). Group by date, describe what changed and why, list affected files
+- Always update `docs/DOCUMENTATION.md` when changes or additions are not reflected in it (new features, changed APIs, updated constants, new dependencies, architecture changes)
