@@ -2,6 +2,12 @@
 
 ## 2026-02-19
 
+### Changed: 5-minute markets for all assets
+
+- **Added ETH, SOL, XRP to 5m timeframe** — Polymarket now offers 5-minute markets for all four assets (previously BTC only). Updated `available_timeframes` from `["15m"]` to `["5m", "15m"]`.
+
+**Files**: `config.py`
+
 ### Fixed: CLOB order book data (bid/ask now reflects real market prices)
 
 - **Handle `price_change` events** — The CLOB WebSocket sends ~75% of messages as `price_change` (incremental level updates) which were being silently ignored. Only `book` (full snapshot) events were processed. Now both are handled.

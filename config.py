@@ -22,17 +22,17 @@ ASSET_REGISTRY = {
     "eth": {
         "chainlink_symbol": "eth/usd",
         "binance_symbol": "ethusdt",
-        "available_timeframes": ["15m"],
+        "available_timeframes": ["5m", "15m"],
     },
     "sol": {
         "chainlink_symbol": "sol/usd",
         "binance_symbol": "solusdt",
-        "available_timeframes": ["15m"],
+        "available_timeframes": ["5m", "15m"],
     },
     "xrp": {
         "chainlink_symbol": "xrp/usd",
         "binance_symbol": "xrpusdt",
-        "available_timeframes": ["15m"],
+        "available_timeframes": ["5m", "15m"],
     },
 }
 

@@ -18,7 +18,7 @@ Only the Observer exists today. Everything downstream depends on the data it col
 
 Polymarket runs binary prediction markets on whether a crypto asset's price will be higher or lower at the end of a fixed time window compared to the start. These markets exist in two durations:
 
-- **5-minute markets**: Currently BTC only. New market spawns every 5 minutes.
+- **5-minute markets**: BTC, ETH, SOL, XRP. New market spawns every 5 minutes.
 - **15-minute markets**: BTC, ETH, SOL, XRP. New market spawns every 15 minutes.
 
 Each market has two outcome tokens: "Up" and "Down." Tokens pay $1.00 if correct, $0.00 if not. Token prices fluctuate between $0 and $1 based on market consensus. The Up and Down token prices always sum to approximately $1.00.
@@ -199,9 +199,9 @@ ASSET_REGISTRY = {
     "eth": {
         "chainlink_symbol": "eth/usd",
         "binance_symbol": "ethusdt",
-        "available_timeframes": ["15m"],
+        "available_timeframes": ["5m", "15m"],
     },
-    # ... sol, xrp similar (15m only)
+    # ... sol, xrp similar (5m + 15m)
 }
 ```
 
