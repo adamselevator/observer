@@ -713,3 +713,69 @@ The eventual goal is an AI layer that manages the entire system:
 - Handles edge cases the rule-based system can't (unusual market conditions, API changes)
 
 The Observer's flat-file output format is designed to be readable by any process. The AI orchestrator can consume CSVs and JSONLs without needing a shared database or IPC mechanism.
+
+---
+
+## 9. Analysis Tooling
+
+### Setup
+
+Analysis dependencies are separate from runtime:
+
+```bash
+uv venv .venv                                    # Creates venv with Python 3.12
+source .venv/bin/activate
+uv pip install -r requirements.txt -r requirements-analysis.txt
+```
+
+### Module Map
+
+```
+analysis/
+├── __init__.py
+├── data_loader.py              # Load CSVs + JSONLs into DataFrames
+├── backtest.py                 # Sigmoid formula replay engine
+├── eda.ipynb                   # Exploratory data analysis
+└── backtest_results.ipynb      # Backtest results + parameter search
+```
+
+### Data Loader (`analysis/data_loader.py`)
+
+Key functions:
+
+- `load_snapshots(asset, timeframe, date=None)` — Load snapshot CSV(s) into a DataFrame. Coerces numeric columns, auto-discovers dates if none given.
+- `load_intervals(asset, timeframe, date=None)` — Load interval JSONL(s), joining summary + resolution records into one row per interval.
+- `load_all_intervals(timeframe)` / `load_all_snapshots(timeframe)` — Load all assets for a timeframe.
+- `join_snapshots_intervals(snapshots, intervals)` — Merge resolution labels and interval-level features (chainlink_open, realized_vol_20) onto snapshot rows via `interval_id`.
+- `add_formula_features(df, timeframe)` — Compute derived columns: `delta`, `abs_delta`, `in_trading_window`, `window_elapsed`, `window_fraction`, `fee_up`, `fee_down`.
+
+### Backtest Engine (`analysis/backtest.py`)
+
+Replays the sigmoid confidence formula second-by-second:
+
+```python
+from analysis.backtest import run_backtest, FormulaParams, GateConfig
+
+bt = run_backtest(snapshots, intervals,
+                  params=FormulaParams(a=5, b=3, offset=4),
+                  gates=GateConfig(min_token_price=0.65, max_token_price=0.85),
+                  timeframe="5m")
+print(bt.summary())
+```
+
+**FormulaParams**: `a` (delta sensitivity), `b` (time weight), `offset` (sigmoid centering), `flip_threshold`.
+
+**GateConfig**: `min_token_price`, `max_token_price`, `min_depth`, `require_live_book`, `require_live_chainlink`.
+
+**BacktestResult** properties: `win_rate`, `profit_factor`, `total_pnl`, `total_fees`, `summary()`.
+
+**PnL model**: Each entry buys 1 share at the ask price + fee. On settlement, the token pays $1 (correct) or $0 (wrong). Flips abandon the first position (worst case $0 payout) and enter a new one.
+
+### Running Notebooks
+
+```bash
+source .venv/bin/activate
+jupyter notebook analysis/        # Interactive
+# Or headless:
+jupyter nbconvert --execute analysis/eda.ipynb --to notebook
+```

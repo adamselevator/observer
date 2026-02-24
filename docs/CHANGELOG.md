@@ -2,6 +2,16 @@
 
 ## 2026-02-19
 
+### Added: Analysis tooling (EDA + backtest pipeline)
+
+- **Data loader** (`analysis/data_loader.py`) — Loads snapshot CSVs and interval JSONLs into pandas DataFrames. Joins summary + resolution records, adds formula-derived features (delta, window fraction, fees).
+- **Backtest engine** (`analysis/backtest.py`) — Replays the sigmoid confidence formula second-by-second against historical snapshots. Simulates entries, flips, and settlement. Computes PnL after taker fees. Supports parameter grid search and gate configuration.
+- **EDA notebook** (`analysis/eda.ipynb`) — Data quality, delta distributions, realized vol, token pricing evolution, fee kill zone, book depth/spread, cross-asset correlation, formula preview with calibration curve.
+- **Backtest results notebook** (`analysis/backtest_results.ipynb`) — Default param results, per-asset breakdown, PnL analysis, parameter sensitivity grid search, gate sensitivity, key takeaways.
+- **Analysis dependencies** (`requirements-analysis.txt`) — pandas, numpy, matplotlib, scipy, jupyter. Installed into `.venv/`.
+
+**Files**: `analysis/__init__.py`, `analysis/data_loader.py`, `analysis/backtest.py`, `analysis/eda.ipynb`, `analysis/backtest_results.ipynb`, `requirements-analysis.txt`
+
 ### Changed: 5-minute markets for all assets
 
 - **Added ETH, SOL, XRP to 5m timeframe** — Polymarket now offers 5-minute markets for all four assets (previously BTC only). Updated `available_timeframes` from `["15m"]` to `["5m", "15m"]`.
