@@ -608,23 +608,46 @@ Every callback and loop body is wrapped in try/except with error logging. Unhand
 
 The process itself can crash (out of memory, OS kill, power loss). For production deployment:
 
-**Use a process supervisor**. The simplest option is a systemd service:
+**Use a process supervisor**. The deployed systemd service is at `/etc/systemd/system/observer.service`:
 
 ```ini
 [Unit]
 Description=Polymarket Observer
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=<your-user>
-WorkingDirectory=/path/to/observer
-ExecStart=/usr/bin/python3 main.py
+WorkingDirectory=/root/observer
+ExecStart=/root/observer/venv/bin/python3 main.py
 Restart=always
 RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=observer
 
 [Install]
 WantedBy=multi-user.target
+```
+
+The service uses a Python 3.11 venv at `/root/observer/venv/`. To rebuild the venv:
+
+```bash
+python3.11 -m venv /root/observer/venv
+/root/observer/venv/bin/pip install -r /root/observer/requirements.txt
+```
+
+Useful commands:
+
+```bash
+systemctl status observer           # Check status
+systemctl stop observer             # Graceful stop (SIGTERM)
+systemctl restart observer          # Restart
+journalctl -u observer -f           # Follow logs
+journalctl -u observer --since "1 hour ago"  # Recent logs
 ```
 
 Or use `supervisord`, `pm2`, or any process manager that restarts on exit.

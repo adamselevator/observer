@@ -12,6 +12,16 @@
 
 **Files**: `config.py`, `connections/gamma_poller.py`, `state/interval_tracker.py`, `main.py`
 
+## 2026-02-21
+
+### Added: systemd service for production deployment
+
+- **Created `/etc/systemd/system/observer.service`** — Runs the observer as a managed systemd service with auto-restart, graceful SIGTERM shutdown, and journal logging.
+- **Set up Python 3.11 venv** at `/root/observer/venv/` with all dependencies installed. The service uses this venv instead of the system Python.
+- **Service is enabled and running** — starts on boot via `multi-user.target`.
+
+**Files**: `/etc/systemd/system/observer.service`, `docs/DOCUMENTATION.md`
+
 ## 2026-02-19
 
 ### Changed: 5-minute markets for all assets
