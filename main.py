@@ -183,7 +183,7 @@ class Observer:
         )
 
     def _apply_market_tokens(self, market_info):
-        """Set token IDs on AssetState and IntervalTracker for the active interval."""
+        """Set token IDs and Gamma slug on AssetState and IntervalTracker."""
         state = self.market_state.get(market_info.asset)
         state.set_token_ids(
             market_info.timeframe,
@@ -196,6 +196,12 @@ class Observer:
             market_info.up_token_id,
             market_info.down_token_id,
         )
+        # Store Gamma slug for resolution checking (hourly slugs differ from interval_id)
+        record = self.interval_tracker.get_active(
+            market_info.asset, market_info.timeframe
+        )
+        if record:
+            record.gamma_slug = market_info.slug
 
     def _sync_active_tokens(self):
         """Apply stored market tokens to newly-active intervals."""
@@ -256,9 +262,9 @@ class Observer:
                 # Check pending intervals via Gamma API
                 pending = self.interval_tracker.get_pending_intervals()
                 for record in pending:
-                    resolution = await self.gamma.check_resolution(
-                        record.interval_id
-                    )
+                    # Hourly slugs differ from interval_id; use gamma_slug when set
+                    slug = record.gamma_slug or record.interval_id
+                    resolution = await self.gamma.check_resolution(slug)
                     if resolution:
                         self.interval_tracker.resolve_interval(
                             record.interval_id, resolution

@@ -29,9 +29,10 @@ class IntervalRecord:
     start_ts: int
     end_ts: int
 
-    # Token IDs
+    # Market metadata
     up_token_id: str = ""
     down_token_id: str = ""
+    gamma_slug: str = ""
 
     # Chainlink prices
     chainlink_open: float | None = None

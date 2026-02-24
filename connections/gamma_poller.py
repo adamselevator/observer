@@ -8,7 +8,9 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 try:
     import aiohttp
@@ -16,7 +18,13 @@ except ImportError:
     aiohttp = None
 
 from clock import get_current_interval_start
-from config import GAMMA_REST_URL, GAMMA_POLL_INTERVAL_S, TIMEFRAME_SETTINGS, SSL_CONTEXT
+from config import (
+    GAMMA_REST_URL,
+    GAMMA_POLL_INTERVAL_S,
+    HOURLY_ASSET_NAMES,
+    TIMEFRAME_SETTINGS,
+    SSL_CONTEXT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +67,11 @@ class GammaPoller:
     # Pattern to match market slugs like "btc-updown-5m-1739836800"
     SLUG_PATTERN = re.compile(
         r"(?P<asset>btc|eth|sol|xrp)[- ](?:up(?:down)?|down)[- ]"
-        r"(?P<timeframe>5m|15m)[- ](?P<ts>\d{10})",
+        r"(?P<timeframe>5m|15m|1h)[- ](?P<ts>\d{10})",
         re.IGNORECASE,
     )
+
+    ET = ZoneInfo("America/New_York")
 
     def __init__(
         self,
@@ -120,13 +130,27 @@ class GammaPoller:
 
                 # Check current and next interval
                 for start_ts in (current_start, current_start + duration):
-                    slug = f"{asset}-updown-{timeframe}-{start_ts}"
+                    if timeframe == "1h":
+                        slug = self._build_hourly_slug(asset, start_ts)
+                    else:
+                        slug = f"{asset}-updown-{timeframe}-{start_ts}"
                     if slug in self._known_slugs:
                         continue
-                    await self._fetch_by_slug(slug)
+                    metadata = (asset, timeframe, start_ts)
+                    await self._fetch_by_slug(slug, metadata=metadata)
 
-    async def _fetch_by_slug(self, slug: str):
-        """Query Gamma API for a single event by slug."""
+    async def _fetch_by_slug(
+        self,
+        slug: str,
+        metadata: tuple[str, str, int] | None = None,
+    ):
+        """Query Gamma API for a single event by slug.
+
+        Args:
+            slug: Gamma API slug to query.
+            metadata: Optional (asset, timeframe, start_ts) when caller already
+                      knows these values (e.g. hourly markets with non-parseable slugs).
+        """
         try:
             url = f"{GAMMA_REST_URL}/events"
             params = {"slug": slug}
@@ -144,14 +168,18 @@ class GammaPoller:
                 return
 
             for market in events[0].get("markets", []):
-                self._process_market(market)
+                self._process_market(market, metadata=metadata)
 
         except asyncio.TimeoutError:
             logger.warning(f"[gamma] Timeout querying {slug}")
         except Exception as e:
             logger.error(f"[gamma] Poll error for {slug}: {e}")
 
-    def _process_market(self, market: dict):
+    def _process_market(
+        self,
+        market: dict,
+        metadata: tuple[str, str, int] | None = None,
+    ):
         """Parse a market object and emit if it's new and relevant."""
         slug = market.get("slug", "")
 
@@ -159,16 +187,19 @@ class GammaPoller:
         if slug in self._known_slugs:
             return
 
-        # Try to parse the slug
-        parsed = self._parse_slug(slug)
-        if not parsed:
-            # Also try parsing from question field
-            question = market.get("question", "")
-            parsed = self._parse_question(question)
+        if metadata:
+            # Caller already knows asset/timeframe/start_ts (e.g. hourly markets)
+            asset, timeframe, start_ts = metadata
+        else:
+            # Try to parse the slug
+            parsed = self._parse_slug(slug)
             if not parsed:
-                return
-
-        asset, timeframe, start_ts = parsed
+                # Also try parsing from question field
+                question = market.get("question", "")
+                parsed = self._parse_question(question)
+                if not parsed:
+                    return
+            asset, timeframe, start_ts = parsed
 
         # Filter by configured assets and timeframes
         if asset not in self._assets:
@@ -259,6 +290,22 @@ class GammaPoller:
                 int(match.group("ts")),
             )
         return None
+
+    @classmethod
+    def _build_hourly_slug(cls, asset: str, start_ts: int) -> str:
+        """Build the Gamma API slug for an hourly market.
+
+        Hourly slugs use ET timezone, full asset names, and 12-hour time:
+        e.g. ``bitcoin-up-or-down-february-24-3am-et``
+        """
+        full_name = HOURLY_ASSET_NAMES.get(asset, asset)
+        dt_utc = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+        dt_et = dt_utc.astimezone(cls.ET)
+        month = dt_et.strftime("%B").lower()
+        day = dt_et.day
+        hour = int(dt_et.strftime("%I"))  # 12-hour, no leading zero
+        ampm = dt_et.strftime("%p").lower()
+        return f"{full_name}-up-or-down-{month}-{day}-{hour}{ampm}-et"
 
     async def check_resolution(self, market_slug: str) -> str | None:
         """Check if a market has resolved. Returns 'up', 'down', or None."""

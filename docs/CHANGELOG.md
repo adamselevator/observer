@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-02-24
+
+### Added: 1-hour market timeframe
+
+- **Added 1h timeframe** — Polymarket offers hourly up/down markets for BTC, ETH, SOL, XRP. Hourly markets differ from 5m/15m: settled by Binance (not Chainlink), no taker fees, different slug format.
+- **Hourly slug construction** — Gamma API uses human-readable slugs (`bitcoin-up-or-down-february-24-3am-et`) with ET timezone. Added `_build_hourly_slug()` to construct these from Unix timestamps using `zoneinfo`.
+- **Metadata-based market processing** — `_poll()` now passes `(asset, timeframe, start_ts)` metadata to `_process_market()` so hourly markets don't need slug parsing.
+- **`gamma_slug` on IntervalRecord** — Stores the Gamma API slug for resolution checking, since hourly Gamma slugs don't match our internal `interval_id` format.
+- **Config** — Added `TIMEFRAME_SETTINGS["1h"]` (3600s duration, 2400s trading window), `HOURLY_ASSET_NAMES` mapping, and `"1h"` to all assets' `available_timeframes`.
+
+**Files**: `config.py`, `connections/gamma_poller.py`, `state/interval_tracker.py`, `main.py`
+
 ## 2026-02-19
 
 ### Changed: 5-minute markets for all assets

@@ -17,28 +17,37 @@ ASSET_REGISTRY = {
     "btc": {
         "chainlink_symbol": "btc/usd",
         "binance_symbol": "btcusdt",
-        "available_timeframes": ["5m", "15m"],
+        "available_timeframes": ["5m", "15m", "1h"],
     },
     "eth": {
         "chainlink_symbol": "eth/usd",
         "binance_symbol": "ethusdt",
-        "available_timeframes": ["5m", "15m"],
+        "available_timeframes": ["5m", "15m", "1h"],
     },
     "sol": {
         "chainlink_symbol": "sol/usd",
         "binance_symbol": "solusdt",
-        "available_timeframes": ["5m", "15m"],
+        "available_timeframes": ["5m", "15m", "1h"],
     },
     "xrp": {
         "chainlink_symbol": "xrp/usd",
         "binance_symbol": "xrpusdt",
-        "available_timeframes": ["5m", "15m"],
+        "available_timeframes": ["5m", "15m", "1h"],
     },
 }
 
 TIMEFRAME_SETTINGS = {
     "5m": {"duration_s": 300, "trading_window_s": 240},
     "15m": {"duration_s": 900, "trading_window_s": 600},
+    "1h": {"duration_s": 3600, "trading_window_s": 2400},
+}
+
+# Full asset names used in hourly Gamma API slugs
+HOURLY_ASSET_NAMES = {
+    "btc": "bitcoin",
+    "eth": "ethereum",
+    "sol": "solana",
+    "xrp": "xrp",
 }
 
 # ── Endpoints ──────────────────────────────────────────────────────────────

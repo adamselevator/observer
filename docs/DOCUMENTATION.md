@@ -16,14 +16,19 @@ Only the Observer exists today. Everything downstream depends on the data it col
 
 ### The Markets
 
-Polymarket runs binary prediction markets on whether a crypto asset's price will be higher or lower at the end of a fixed time window compared to the start. These markets exist in two durations:
+Polymarket runs binary prediction markets on whether a crypto asset's price will be higher or lower at the end of a fixed time window compared to the start. These markets exist in three durations:
 
 - **5-minute markets**: BTC, ETH, SOL, XRP. New market spawns every 5 minutes.
 - **15-minute markets**: BTC, ETH, SOL, XRP. New market spawns every 15 minutes.
+- **Hourly markets**: BTC, ETH, SOL, XRP. New market spawns every hour.
 
 Each market has two outcome tokens: "Up" and "Down." Tokens pay $1.00 if correct, $0.00 if not. Token prices fluctuate between $0 and $1 based on market consensus. The Up and Down token prices always sum to approximately $1.00.
 
-Resolution is determined by comparing the Chainlink BTC/USD (or ETH/USD, SOL/USD, XRP/USD) price at interval start versus interval end. If end ≥ start, "Up" wins. If end < start, "Down" wins. This is critical: Chainlink is the source of truth for 5-min and 15-min markets, not Binance. Daily markets use Binance, but we don't trade those.
+Resolution depends on the timeframe:
+- **5-min and 15-min markets**: Settled by Chainlink RTDS oracle (BTC/USD, ETH/USD, etc.). Chainlink is the source of truth — not Binance. Taker fees are enabled.
+- **Hourly markets**: Settled by **Binance** (BTC/USDT, ETH/USDT, etc.) using the 1-hour candle open/close. Taker fees are **disabled**.
+
+For all timeframes: if close ≥ open, "Up" wins. If close < open, "Down" wins.
 
 ### The Trading Strategy (Not Yet Implemented)
 
@@ -185,7 +190,7 @@ python3 main.py --asset btc --timeframe 5m  # BTC 5-minute only
 python3 main.py --data-dir /path/to/data    # Custom output directory
 ```
 
-The CLI validates combinations. If you specify `--asset eth --timeframe 5m`, it exits with an error because ETH doesn't have 5-minute markets.
+The CLI validates combinations. Invalid combinations exit with an error.
 
 ### Asset Registry (config.py)
 
@@ -194,20 +199,20 @@ ASSET_REGISTRY = {
     "btc": {
         "chainlink_symbol": "btc/usd",
         "binance_symbol": "btcusdt",
-        "available_timeframes": ["5m", "15m"],
+        "available_timeframes": ["5m", "15m", "1h"],
     },
     "eth": {
         "chainlink_symbol": "eth/usd",
         "binance_symbol": "ethusdt",
-        "available_timeframes": ["5m", "15m"],
+        "available_timeframes": ["5m", "15m", "1h"],
     },
-    # ... sol, xrp similar (5m + 15m)
+    # ... sol, xrp similar (5m + 15m + 1h)
 }
 ```
 
-**To add a new asset**: Add an entry here. No code changes needed. The Observer will automatically subscribe to the new Chainlink and Binance symbols, discover markets via Gamma, and write separate data files.
+**To add a new asset**: Add an entry here and add to `HOURLY_ASSET_NAMES` if the asset has hourly markets. The Observer will automatically subscribe to the new Chainlink and Binance symbols, discover markets via Gamma, and write separate data files.
 
-**To add a new timeframe** (e.g., if Polymarket launches 1-hour markets): Add to `TIMEFRAME_SETTINGS` and update the relevant asset's `available_timeframes`. The clock module already handles arbitrary durations.
+**To add a new timeframe**: Add to `TIMEFRAME_SETTINGS` and update the relevant asset's `available_timeframes`. The clock module already handles arbitrary durations. Note: timeframes using human-readable Gamma slugs (like 1h) need slug construction logic in `gamma_poller.py`.
 
 ### Timeframe Settings
 
@@ -215,6 +220,7 @@ ASSET_REGISTRY = {
 TIMEFRAME_SETTINGS = {
     "5m":  {"duration_s": 300, "trading_window_s": 240},
     "15m": {"duration_s": 900, "trading_window_s": 600},
+    "1h":  {"duration_s": 3600, "trading_window_s": 2400},
 }
 ```
 
@@ -529,11 +535,24 @@ Some CLOB messages are arrays (not dicts) — the Observer guards against this w
 **Endpoint**: `GET https://gamma-api.polymarket.com/events?slug=<slug>`
 **Authentication**: None required
 
-The Observer constructs expected slugs directly (`{asset}-updown-{tf}-{start_ts}`) and queries for the current and next interval. This replaced an earlier tag-based approach (`?tag=crypto&tag=up-or-down`) which returned no results for up-down markets.
+The Observer constructs expected slugs and queries for the current and next interval. Slug format depends on timeframe:
+
+**5m / 15m slugs** (timestamp-based):
+- Format: `{asset}-updown-{tf}-{start_ts}` (e.g., `btc-updown-5m-1739836800`)
+- Parsed via regex to extract asset, timeframe, and Unix start timestamp
+- `clobTokenIds` is a **JSON-encoded string** — requires `json.loads()` to deserialize
+
+**Hourly slugs** (human-readable, ET timezone):
+- Format: `{full_name}-up-or-down-{month}-{day}-{hour}{am/pm}-et` (e.g., `bitcoin-up-or-down-february-24-3am-et`)
+- Full asset names: `bitcoin`, `ethereum`, `solana`, `xrp` (mapped via `HOURLY_ASSET_NAMES`)
+- Time is in ET (America/New_York), 12-hour clock, lowercase month — handles EST/EDT via `zoneinfo`
+- `clobTokenIds` is a **native array** (not JSON-encoded)
+- `eventStartTime` provides the candle start in ISO 8601 UTC
+- The caller passes `(asset, timeframe, start_ts)` metadata so `_process_market()` doesn't need to parse the slug
 
 Returns event objects containing nested market objects. Each market has:
-- `slug`: e.g., `"btc-updown-15m-1739836800"` — parsed via regex to extract asset, timeframe, and Unix start timestamp
-- `clobTokenIds`: **JSON-encoded string** (not a native array) — e.g., `"[\"0x1234...\",\"0x5678...\"]"`. Requires `json.loads()` to deserialize into a list of token IDs
+- `slug`: Market identifier (format varies by timeframe, see above)
+- `clobTokenIds`: Token IDs for CLOB subscription (string or array depending on timeframe)
 - `outcomes`: Array like `["Up", "Down"]` — mapped to token IDs by position
 - `outcomePrices`: Current prices (used for resolution checking)
 
@@ -541,7 +560,7 @@ Returns event objects containing nested market objects. Each market has:
 
 **Token ID lifecycle**: When GammaPoller discovers a future interval's market, the token IDs are stored in `_discovered_markets` but not immediately applied to `AssetState`. Token IDs are only applied when the interval becomes active (via `_sync_active_tokens()`), preventing stale book data from overwriting the current interval's tokens.
 
-**Resolution checking**: `GET https://gamma-api.polymarket.com/markets?slug=<slug>` — checks if `closed: true` and reads `outcomePrices` to determine winner.
+**Resolution checking**: `GET https://gamma-api.polymarket.com/markets?slug=<slug>` — checks if `closed: true` and reads `outcomePrices` to determine winner. For hourly markets, the stored `gamma_slug` is used instead of `interval_id` since hourly Gamma slugs don't match the internal ID format.
 
 ### Binance REST API (Backfill & Cold Start)
 
