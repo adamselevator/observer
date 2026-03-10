@@ -19,10 +19,32 @@ TIMEFRAME_SETTINGS = {
 
 SNAPSHOT_NUMERIC_COLS = [
     "chainlink_price", "binance_price",
-    "up_token_bid", "up_token_ask", "up_depth_1", "up_depth_2", "up_depth_3",
-    "down_token_bid", "down_token_ask", "down_depth_1", "down_depth_2", "down_depth_3",
+    "up_token_bid", "up_token_ask",
+    "up_bid_depth_1", "up_bid_depth_2", "up_bid_depth_3",
+    "up_ask_depth_1", "up_ask_depth_2", "up_ask_depth_3",
+    "up_bid_price_2", "up_bid_price_3",
+    "up_ask_price_2", "up_ask_price_3",
+    "down_token_bid", "down_token_ask",
+    "down_bid_depth_1", "down_bid_depth_2", "down_bid_depth_3",
+    "down_ask_depth_1", "down_ask_depth_2", "down_ask_depth_3",
+    "down_bid_price_2", "down_bid_price_3",
+    "down_ask_price_2", "down_ask_price_3",
     "spread_up", "spread_down",
+    "up_crossed", "down_crossed",
+    "up_bid_age_ms", "up_ask_age_ms",
+    "down_bid_age_ms", "down_ask_age_ms",
 ]
+
+# Old column names from before bid-side depth was captured.
+# up_depth_1/2/3 were ask-side only.
+_OLD_DEPTH_RENAMES = {
+    "up_depth_1": "up_ask_depth_1",
+    "up_depth_2": "up_ask_depth_2",
+    "up_depth_3": "up_ask_depth_3",
+    "down_depth_1": "down_ask_depth_1",
+    "down_depth_2": "down_ask_depth_2",
+    "down_depth_3": "down_ask_depth_3",
+}
 
 
 # ── Snapshot loading ──────────────────────────────────────────────────────
@@ -51,6 +73,9 @@ def load_snapshots(
         if not f.exists():
             continue
         df = pd.read_csv(f, low_memory=False)
+        # Migrate old column names (ask-only depth) to new format
+        if "up_depth_1" in df.columns and "up_ask_depth_1" not in df.columns:
+            df = df.rename(columns=_OLD_DEPTH_RENAMES)
         for col in SNAPSHOT_NUMERIC_COLS:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")

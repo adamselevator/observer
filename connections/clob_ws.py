@@ -16,7 +16,13 @@ logger = logging.getLogger(__name__)
 class ClobWS(BaseWebSocket):
     """Connects to Polymarket CLOB WebSocket for order book data."""
 
-    def __init__(self, on_book_update=None, on_level_update=None, on_price_snap=None):
+    def __init__(
+        self,
+        on_book_update=None,
+        on_level_update=None,
+        on_levels_batch=None,
+        on_price_snap=None,
+    ):
         """
         Args:
             on_book_update: callback(token_id, bids, asks)
@@ -25,6 +31,12 @@ class ClobWS(BaseWebSocket):
             on_level_update: callback(token_id, side, price, size)
                 Called on individual level changes (price_change events).
                 side is "BUY" or "SELL", size 0 means remove.
+                Only used if on_levels_batch is not set.
+            on_levels_batch: callback(token_id, changes)
+                changes is a list of (side, price, size) tuples.
+                Called once per asset_id with all changes from one message
+                batched together. Preferred over on_level_update for
+                atomic timestamp handling.
             on_price_snap: callback(token_id, price)
                 Called when a token snaps to 0 or 1 (resolution detection)
         """
@@ -35,6 +47,7 @@ class ClobWS(BaseWebSocket):
         )
         self._on_book_update = on_book_update
         self._on_level_update = on_level_update
+        self._on_levels_batch = on_levels_batch
         self._on_price_snap = on_price_snap
         self._subscribed_markets: set[str] = set()  # condition IDs / asset IDs
         self._pending_subscriptions: list[str] = []
@@ -100,10 +113,17 @@ class ClobWS(BaseWebSocket):
                     logger.error(f"[{self.name}] Price snap callback error: {e}")
 
     def _handle_price_changes(self, msg: dict):
-        """Process incremental level changes (price_changes array)."""
-        changes = msg.get("price_changes", [])
+        """Process incremental level changes (price_changes array).
 
-        for change in changes:
+        Groups all changes by asset_id and applies them as a batch so that
+        bid and ask side timestamps are set atomically when both sides
+        arrive in the same message.
+        """
+        raw_changes = msg.get("price_changes", [])
+
+        # Group parsed changes by asset_id
+        batches: dict[str, list[tuple[str, float, float]]] = {}
+        for change in raw_changes:
             asset_id = change.get("asset_id", "")
             side = change.get("side", "").upper()
             price_str = change.get("price", "")
@@ -118,19 +138,32 @@ class ClobWS(BaseWebSocket):
             except (ValueError, TypeError):
                 continue
 
-            if self._on_level_update:
-                try:
-                    self._on_level_update(asset_id, side, price, size)
-                except Exception as e:
-                    logger.error(f"[{self.name}] Level update callback error: {e}")
+            batches.setdefault(asset_id, []).append((side, price, size))
 
-            # Resolution detection from level update
-            if self._on_price_snap and side == "BUY":
-                if price >= 0.95 or price < 0.01:
+        # Dispatch each asset's changes as a batch
+        for asset_id, changes in batches.items():
+            if self._on_levels_batch:
+                try:
+                    self._on_levels_batch(asset_id, changes)
+                except Exception as e:
+                    logger.error(f"[{self.name}] Levels batch callback error: {e}")
+            elif self._on_level_update:
+                for side, price, size in changes:
                     try:
-                        self._on_price_snap(asset_id, price)
+                        self._on_level_update(asset_id, side, price, size)
                     except Exception as e:
-                        logger.error(f"[{self.name}] Price snap callback error: {e}")
+                        logger.error(f"[{self.name}] Level update callback error: {e}")
+
+            # Resolution detection from level updates
+            if self._on_price_snap:
+                for side, price, size in changes:
+                    if side == "BUY" and (price >= 0.95 or price < 0.01):
+                        try:
+                            self._on_price_snap(asset_id, price)
+                        except Exception as e:
+                            logger.error(
+                                f"[{self.name}] Price snap callback error: {e}"
+                            )
 
     async def subscribe_markets(self, asset_ids: list[str]):
         """Subscribe to book updates for new market tokens."""

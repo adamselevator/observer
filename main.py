@@ -106,7 +106,7 @@ class Observer:
         )
         self.clob_ws = ClobWS(
             on_book_update=self._on_book_update,
-            on_level_update=self._on_level_update,
+            on_levels_batch=self._on_levels_batch,
             on_price_snap=self._on_price_snap,
         )
         self.gamma = GammaPoller(
@@ -154,6 +154,16 @@ class Observer:
     def _on_level_update(self, token_id: str, side: str, price: float, size: float):
         """Handle incremental level change from CLOB (price_change event)."""
         self.market_state.update_book_level(token_id, side, price, size)
+
+    def _on_levels_batch(
+        self, token_id: str, changes: list[tuple[str, float, float]]
+    ):
+        """Handle batched level changes from CLOB (all changes from one message).
+
+        Applies all changes atomically so bid/ask side timestamps are set
+        together when both sides arrive in the same price_changes message.
+        """
+        self.market_state.update_book_levels_batch(token_id, changes)
 
     def _on_price_snap(self, token_id: str, price: float):
         """Detect market resolution from token price snapping to 0 or 1."""

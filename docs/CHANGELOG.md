@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-03-10
+
+### Added: L2/L3 price columns for slippage modeling
+
+Added 8 new columns capturing bid and ask prices at depth levels 2 and 3 for both up and down tokens. Combined with existing depth (size) columns, this enables multi-level fill simulation for larger bet sizes ($100+) where orders eat through L1 into deeper levels.
+
+- **`TokenBook.top_prices(n)`** — Returns top N bid and ask prices, padded with 0.0
+- **New snapshot columns** — `up_bid_price_2`, `up_bid_price_3`, `up_ask_price_2`, `up_ask_price_3`, `down_bid_price_2`, `down_bid_price_3`, `down_ask_price_2`, `down_ask_price_3`
+- **Backward-compatible** — `data_loader.py` numeric conversion uses `if col in df.columns` guard; old CSVs load without error
+
+**Files**: `state/market_state.py`, `writers/snapshot_writer.py`, `analysis/data_loader.py`
+
+### Fixed: Atomic batch processing of CLOB price_changes
+
+Previously, each level change from a CLOB `price_changes` message was applied individually with its own timestamp, even when a single message contained updates for both bid and ask sides. This caused ~33% of snapshots to have crossed (inverted) books because the two sides had different timestamps.
+
+- **Batch level updates** — `ClobWS._handle_price_changes()` now groups all changes by `asset_id` and dispatches each group as a single batch via the new `on_levels_batch` callback
+- **`TokenBook.apply_levels_batch()`** — Applies multiple level changes with a single timestamp; if both BUY and SELL changes are present, both `last_bid_update` and `last_ask_update` are set to the same value
+- **`AssetState.update_book_levels_batch()` / `MarketState.update_book_levels_batch()`** — Route batched changes through the state hierarchy
+- **Backward-compatible** — `on_level_update` callback still supported as fallback if `on_levels_batch` is not set
+
+**Files**: `connections/clob_ws.py`, `state/market_state.py`, `main.py`
+
+## 2026-03-09
+
+### Fixed: Order book data quality for accurate trade simulation
+
+Previously only ask-side depth was recorded, bid/ask sides had no independent staleness tracking, and ~33% of book snapshots had crossed (inverted) bid/ask prices from incremental CLOB updates arriving at different times. This inflated simulated PnL by ~24%+.
+
+- **Added bid-side depth columns** — `up_bid_depth_1/2/3`, `down_bid_depth_1/2/3` alongside renamed ask columns `up_ask_depth_1/2/3`, `down_ask_depth_1/2/3`
+- **Per-side update timestamps** — `TokenBook` now tracks `last_bid_update` and `last_ask_update` independently, written to CSV as `up_bid_age_ms`, `up_ask_age_ms`, `down_bid_age_ms`, `down_ask_age_ms`
+- **Crossed book flags** — `up_crossed`, `down_crossed` columns (0/1) flag when ask <= bid, letting simulations filter unreliable quotes
+- **`is_crossed` and `best_bid_size`/`best_ask_size` properties** on `TokenBook` for runtime checks
+- **Backward-compatible data loader** — `data_loader.py` auto-renames old `up_depth_1` → `up_ask_depth_1` when loading legacy CSVs
+
+**Files**: `state/market_state.py`, `writers/snapshot_writer.py`, `analysis/data_loader.py`, `analysis/backtest.py`, `docs/DOCUMENTATION.md`
+
 ## 2026-02-19
 
 ### Added: Analysis tooling (EDA + backtest pipeline)
