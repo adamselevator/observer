@@ -30,16 +30,36 @@ SNAPSHOT_COLUMNS = [
     "binance_tick_age_ms",
     "up_token_bid",
     "up_token_ask",
-    "up_depth_1",
-    "up_depth_2",
-    "up_depth_3",
+    "up_bid_depth_1",
+    "up_bid_depth_2",
+    "up_bid_depth_3",
+    "up_ask_depth_1",
+    "up_ask_depth_2",
+    "up_ask_depth_3",
+    "up_bid_price_2",
+    "up_bid_price_3",
+    "up_ask_price_2",
+    "up_ask_price_3",
     "down_token_bid",
     "down_token_ask",
-    "down_depth_1",
-    "down_depth_2",
-    "down_depth_3",
+    "down_bid_depth_1",
+    "down_bid_depth_2",
+    "down_bid_depth_3",
+    "down_ask_depth_1",
+    "down_ask_depth_2",
+    "down_ask_depth_3",
+    "down_bid_price_2",
+    "down_bid_price_3",
+    "down_ask_price_2",
+    "down_ask_price_3",
     "spread_up",
     "spread_down",
+    "up_crossed",
+    "down_crossed",
+    "up_bid_age_ms",
+    "up_ask_age_ms",
+    "down_bid_age_ms",
+    "down_ask_age_ms",
     "book_source",
 ]
 
@@ -107,15 +127,11 @@ class SnapshotWriter:
                 bn_price = ""
                 bn_age = -1
 
-            # Book data — need to find the right book for this timeframe
-            up_token_id = state.up_token_ids.get(timeframe, "")
-            down_token_id = state.down_token_ids.get(timeframe, "")
-
-            up_book = state.up_book
-            down_book = state.down_book
+            # Book data for this specific timeframe
+            up_book, down_book = state.get_book(timeframe)
             book_source = "live"
 
-            # Check if book data is for the right tokens and fresh
+            # Check if book data is present
             if up_book.last_update == 0 or down_book.last_update == 0:
                 book_source = "missing"
 
@@ -126,9 +142,19 @@ class SnapshotWriter:
 
             up_bid_depths, up_ask_depths = up_book.top_depths(3)
             down_bid_depths, down_ask_depths = down_book.top_depths(3)
+            up_bid_prices, up_ask_prices = up_book.top_prices(3)
+            down_bid_prices, down_ask_prices = down_book.top_prices(3)
 
             spread_up = up_book.spread if up_book.spread is not None else ""
             spread_down = down_book.spread if down_book.spread is not None else ""
+
+            # Crossed book flags (bid >= ask = stale/unreliable quote)
+            up_crossed = 1 if up_book.is_crossed else 0
+            down_crossed = 1 if down_book.is_crossed else 0
+
+            # Per-side staleness (ms since last update for each side)
+            up_bid_age, up_ask_age = up_book.side_age_ms
+            down_bid_age, down_ask_age = down_book.side_age_ms
 
             row = [
                 now_int,
@@ -143,16 +169,36 @@ class SnapshotWriter:
                 bn_age,
                 up_bid,
                 up_ask,
-                up_ask_depths[0],  # depth at best ask level
+                up_bid_depths[0],
+                up_bid_depths[1] if len(up_bid_depths) > 1 else 0,
+                up_bid_depths[2] if len(up_bid_depths) > 2 else 0,
+                up_ask_depths[0],
                 up_ask_depths[1] if len(up_ask_depths) > 1 else 0,
                 up_ask_depths[2] if len(up_ask_depths) > 2 else 0,
+                up_bid_prices[1],
+                up_bid_prices[2],
+                up_ask_prices[1],
+                up_ask_prices[2],
                 down_bid,
                 down_ask,
+                down_bid_depths[0],
+                down_bid_depths[1] if len(down_bid_depths) > 1 else 0,
+                down_bid_depths[2] if len(down_bid_depths) > 2 else 0,
                 down_ask_depths[0],
                 down_ask_depths[1] if len(down_ask_depths) > 1 else 0,
                 down_ask_depths[2] if len(down_ask_depths) > 2 else 0,
+                down_bid_prices[1],
+                down_bid_prices[2],
+                down_ask_prices[1],
+                down_ask_prices[2],
                 spread_up,
                 spread_down,
+                up_crossed,
+                down_crossed,
+                up_bid_age,
+                up_ask_age,
+                down_bid_age,
+                down_ask_age,
                 book_source,
             ]
 

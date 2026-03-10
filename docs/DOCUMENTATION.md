@@ -293,16 +293,36 @@ One row per second per (asset, timeframe) pair. This is the primary dataset for 
 | `binance_tick_age_ms` | int | Milliseconds since last Binance tick. -1 if never received. |
 | `up_token_bid` | float/empty | Best bid price for the Up token |
 | `up_token_ask` | float/empty | Best ask price for the Up token |
-| `up_depth_1` | float | Size at best ask level (level 1) |
-| `up_depth_2` | float | Size at ask level 2 |
-| `up_depth_3` | float | Size at ask level 3 |
+| `up_bid_depth_1` | float | Size at best bid level 1 (Up token) |
+| `up_bid_depth_2` | float | Size at bid level 2 |
+| `up_bid_depth_3` | float | Size at bid level 3 |
+| `up_ask_depth_1` | float | Size at best ask level 1 (Up token) |
+| `up_ask_depth_2` | float | Size at ask level 2 |
+| `up_ask_depth_3` | float | Size at ask level 3 |
+| `up_bid_price_2` | float | Price at bid level 2 (Up token). 0 if fewer than 2 levels. |
+| `up_bid_price_3` | float | Price at bid level 3. 0 if fewer than 3 levels. |
+| `up_ask_price_2` | float | Price at ask level 2 (Up token). 0 if fewer than 2 levels. |
+| `up_ask_price_3` | float | Price at ask level 3. 0 if fewer than 3 levels. |
 | `down_token_bid` | float/empty | Best bid for Down token |
 | `down_token_ask` | float/empty | Best ask for Down token |
-| `down_depth_1` | float | Size at best ask level 1 |
-| `down_depth_2` | float | Size at ask level 2 |
-| `down_depth_3` | float | Size at ask level 3 |
+| `down_bid_depth_1` | float | Size at best bid level 1 (Down token) |
+| `down_bid_depth_2` | float | Size at bid level 2 |
+| `down_bid_depth_3` | float | Size at bid level 3 |
+| `down_ask_depth_1` | float | Size at best ask level 1 (Down token) |
+| `down_ask_depth_2` | float | Size at ask level 2 |
+| `down_ask_depth_3` | float | Size at ask level 3 |
+| `down_bid_price_2` | float | Price at bid level 2 (Down token). 0 if fewer than 2 levels. |
+| `down_bid_price_3` | float | Price at bid level 3. 0 if fewer than 3 levels. |
+| `down_ask_price_2` | float | Price at ask level 2 (Down token). 0 if fewer than 2 levels. |
+| `down_ask_price_3` | float | Price at ask level 3. 0 if fewer than 3 levels. |
 | `spread_up` | float/empty | Ask - bid for Up token |
 | `spread_down` | float/empty | Ask - bid for Down token |
+| `up_crossed` | int (0/1) | 1 if Up token book is crossed (ask <= bid), indicating stale/unreliable quotes |
+| `down_crossed` | int (0/1) | 1 if Down token book is crossed |
+| `up_bid_age_ms` | int | Milliseconds since last Up token bid-side update. -1 if never updated |
+| `up_ask_age_ms` | int | Milliseconds since last Up token ask-side update. -1 if never updated |
+| `down_bid_age_ms` | int | Milliseconds since last Down token bid-side update. -1 if never updated |
+| `down_ask_age_ms` | int | Milliseconds since last Down token ask-side update. -1 if never updated |
 | `book_source` | string | `live` or `missing` (CLOB has no backfill) |
 
 **Edge cases**:
@@ -522,7 +542,7 @@ Note: asks may appear as `"sells"` or `"asks"` depending on the message. Bids ar
 }
 ```
 
-The `price_changes` array contains one or more per-token level changes. Each change specifies a side (`BUY` for bids, `SELL` for asks), a price level, and the new size at that level. A size of `"0"` means the level should be removed from the book. The Observer merges these into the running `TokenBook` via sorted insert, in-place update, or removal.
+The `price_changes` array contains one or more per-token level changes. Each change specifies a side (`BUY` for bids, `SELL` for asks), a price level, and the new size at that level. A size of `"0"` means the level should be removed from the book. The Observer groups all changes from one message by `asset_id` and applies each group as an atomic batch via `TokenBook.apply_levels_batch()`. This ensures that when both BUY and SELL changes arrive in the same message, both `last_bid_update` and `last_ask_update` are set to the same timestamp, preventing false crossed-book detection from asynchronous side updates.
 
 Some CLOB messages are arrays (not dicts) — the Observer guards against this with an `isinstance(msg, dict)` check before processing.
 
@@ -755,3 +775,69 @@ The eventual goal is an AI layer that manages the entire system:
 - Handles edge cases the rule-based system can't (unusual market conditions, API changes)
 
 The Observer's flat-file output format is designed to be readable by any process. The AI orchestrator can consume CSVs and JSONLs without needing a shared database or IPC mechanism.
+
+---
+
+## 9. Analysis Tooling
+
+### Setup
+
+Analysis dependencies are separate from runtime:
+
+```bash
+uv venv .venv                                    # Creates venv with Python 3.12
+source .venv/bin/activate
+uv pip install -r requirements.txt -r requirements-analysis.txt
+```
+
+### Module Map
+
+```
+analysis/
+├── __init__.py
+├── data_loader.py              # Load CSVs + JSONLs into DataFrames
+├── backtest.py                 # Sigmoid formula replay engine
+├── eda.ipynb                   # Exploratory data analysis
+└── backtest_results.ipynb      # Backtest results + parameter search
+```
+
+### Data Loader (`analysis/data_loader.py`)
+
+Key functions:
+
+- `load_snapshots(asset, timeframe, date=None)` — Load snapshot CSV(s) into a DataFrame. Coerces numeric columns, auto-discovers dates if none given.
+- `load_intervals(asset, timeframe, date=None)` — Load interval JSONL(s), joining summary + resolution records into one row per interval.
+- `load_all_intervals(timeframe)` / `load_all_snapshots(timeframe)` — Load all assets for a timeframe.
+- `join_snapshots_intervals(snapshots, intervals)` — Merge resolution labels and interval-level features (chainlink_open, realized_vol_20) onto snapshot rows via `interval_id`.
+- `add_formula_features(df, timeframe)` — Compute derived columns: `delta`, `abs_delta`, `in_trading_window`, `window_elapsed`, `window_fraction`, `fee_up`, `fee_down`.
+
+### Backtest Engine (`analysis/backtest.py`)
+
+Replays the sigmoid confidence formula second-by-second:
+
+```python
+from analysis.backtest import run_backtest, FormulaParams, GateConfig
+
+bt = run_backtest(snapshots, intervals,
+                  params=FormulaParams(a=5, b=3, offset=4),
+                  gates=GateConfig(min_token_price=0.65, max_token_price=0.85),
+                  timeframe="5m")
+print(bt.summary())
+```
+
+**FormulaParams**: `a` (delta sensitivity), `b` (time weight), `offset` (sigmoid centering), `flip_threshold`.
+
+**GateConfig**: `min_token_price`, `max_token_price`, `min_depth`, `require_live_book`, `require_live_chainlink`.
+
+**BacktestResult** properties: `win_rate`, `profit_factor`, `total_pnl`, `total_fees`, `summary()`.
+
+**PnL model**: Each entry buys 1 share at the ask price + fee. On settlement, the token pays $1 (correct) or $0 (wrong). Flips abandon the first position (worst case $0 payout) and enter a new one.
+
+### Running Notebooks
+
+```bash
+source .venv/bin/activate
+jupyter notebook analysis/        # Interactive
+# Or headless:
+jupyter nbconvert --execute analysis/eda.ipynb --to notebook
+```

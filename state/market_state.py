@@ -37,11 +37,14 @@ class TokenBook:
 
     Supports both full snapshots (replace) and incremental updates (merge).
     Bids are sorted descending by price, asks ascending.
+    Tracks per-side update timestamps to detect stale quotes.
     """
 
     bids: list[BookLevel] = field(default_factory=list)
     asks: list[BookLevel] = field(default_factory=list)
     last_update: float = 0.0
+    last_bid_update: float = 0.0
+    last_ask_update: float = 0.0
 
     @property
     def best_bid(self) -> float | None:
@@ -52,10 +55,35 @@ class TokenBook:
         return self.asks[0].price if self.asks else None
 
     @property
+    def best_bid_size(self) -> float | None:
+        """Size available at the best bid."""
+        return self.bids[0].size if self.bids else None
+
+    @property
+    def best_ask_size(self) -> float | None:
+        """Size available at the best ask."""
+        return self.asks[0].size if self.asks else None
+
+    @property
     def spread(self) -> float | None:
         if self.best_bid is not None and self.best_ask is not None:
             return self.best_ask - self.best_bid
         return None
+
+    @property
+    def is_crossed(self) -> bool:
+        """True if best ask <= best bid (book sides are out of sync)."""
+        if self.best_bid is None or self.best_ask is None:
+            return False
+        return self.best_ask <= self.best_bid
+
+    @property
+    def side_age_ms(self) -> tuple[int, int]:
+        """(bid_age_ms, ask_age_ms). -1 if never updated."""
+        now = time.time()
+        bid_age = int((now - self.last_bid_update) * 1000) if self.last_bid_update > 0 else -1
+        ask_age = int((now - self.last_ask_update) * 1000) if self.last_ask_update > 0 else -1
+        return bid_age, ask_age
 
     @property
     def age_ms(self) -> int:
@@ -72,6 +100,15 @@ class TokenBook:
         ask_sizes.extend([0.0] * (n - len(ask_sizes)))
         return bid_sizes, ask_sizes
 
+    def top_prices(self, n: int = 3) -> tuple[list[float], list[float]]:
+        """Return top N bid prices and top N ask prices."""
+        bid_prices = [b.price for b in self.bids[:n]]
+        ask_prices = [a.price for a in self.asks[:n]]
+        # Pad with 0 if fewer than n levels
+        bid_prices.extend([0.0] * (n - len(bid_prices)))
+        ask_prices.extend([0.0] * (n - len(ask_prices)))
+        return bid_prices, ask_prices
+
     def apply_level(self, side: str, price: float, size: float):
         """Merge a single level update into the book.
 
@@ -80,11 +117,42 @@ class TokenBook:
             price: Price level
             size: New size (0 = remove the level)
         """
+        now = time.time()
         if side == "BUY":
             self._merge_level(self.bids, price, size, reverse=True)
+            self.last_bid_update = now
         else:
             self._merge_level(self.asks, price, size, reverse=False)
-        self.last_update = time.time()
+            self.last_ask_update = now
+        self.last_update = now
+
+    def apply_levels_batch(self, changes: list[tuple[str, float, float]]):
+        """Apply multiple level updates with a single timestamp.
+
+        When a price_changes message contains both BUY and SELL updates,
+        both sides get the same timestamp, preventing false crossed-book
+        detection from asynchronous side updates.
+
+        Args:
+            changes: list of (side, price, size) tuples
+        """
+        now = time.time()
+        has_bid = False
+        has_ask = False
+
+        for side, price, size in changes:
+            if side == "BUY":
+                self._merge_level(self.bids, price, size, reverse=True)
+                has_bid = True
+            else:
+                self._merge_level(self.asks, price, size, reverse=False)
+                has_ask = True
+
+        if has_bid:
+            self.last_bid_update = now
+        if has_ask:
+            self.last_ask_update = now
+        self.last_update = now
 
     def _merge_level(
         self, levels: list[BookLevel], price: float, size: float, reverse: bool
@@ -119,6 +187,8 @@ class TokenBook:
         self.bids.clear()
         self.asks.clear()
         self.last_update = 0.0
+        self.last_bid_update = 0.0
+        self.last_ask_update = 0.0
 
 
 @dataclass
@@ -128,12 +198,26 @@ class AssetState:
     asset: str
     chainlink: PriceTick | None = None
     binance: PriceTick | None = None
-    up_book: TokenBook = field(default_factory=TokenBook)
-    down_book: TokenBook = field(default_factory=TokenBook)
+
+    # Per-timeframe order books (keyed by timeframe, e.g. "5m", "15m")
+    up_books: dict[str, TokenBook] = field(default_factory=dict)
+    down_books: dict[str, TokenBook] = field(default_factory=dict)
 
     # Token IDs for the current active markets (keyed by timeframe)
     up_token_ids: dict[str, str] = field(default_factory=dict)
     down_token_ids: dict[str, str] = field(default_factory=dict)
+
+    def get_book(self, timeframe: str) -> tuple[TokenBook, TokenBook]:
+        """Get (up_book, down_book) for a specific timeframe."""
+        up = self.up_books.get(timeframe)
+        if up is None:
+            up = TokenBook()
+            self.up_books[timeframe] = up
+        down = self.down_books.get(timeframe)
+        if down is None:
+            down = TokenBook()
+            self.down_books[timeframe] = down
+        return up, down
 
     def update_chainlink(self, price: float, timestamp_ms: int):
         self.chainlink = PriceTick(price=price, timestamp_ms=timestamp_ms)
@@ -143,35 +227,52 @@ class AssetState:
 
     def update_book(self, token_id: str, bids: list[BookLevel], asks: list[BookLevel]):
         """Replace the full order book for a token (snapshot). Matches token_id to up/down."""
-        book = TokenBook(bids=bids, asks=asks, last_update=time.time())
+        now = time.time()
+        book = TokenBook(
+            bids=bids, asks=asks,
+            last_update=now, last_bid_update=now, last_ask_update=now,
+        )
         for tf, tid in self.up_token_ids.items():
             if tid == token_id:
-                self.up_book = book
+                self.up_books[tf] = book
                 return
         for tf, tid in self.down_token_ids.items():
             if tid == token_id:
-                self.down_book = book
+                self.down_books[tf] = book
                 return
 
     def update_book_level(self, token_id: str, side: str, price: float, size: float):
         """Merge a single level change into the book for a token."""
         for tf, tid in self.up_token_ids.items():
             if tid == token_id:
-                self.up_book.apply_level(side, price, size)
+                self.up_books.setdefault(tf, TokenBook()).apply_level(side, price, size)
                 return
         for tf, tid in self.down_token_ids.items():
             if tid == token_id:
-                self.down_book.apply_level(side, price, size)
+                self.down_books.setdefault(tf, TokenBook()).apply_level(side, price, size)
+                return
+
+    def update_book_levels_batch(
+        self, token_id: str, changes: list[tuple[str, float, float]]
+    ):
+        """Apply a batch of level changes atomically for a token."""
+        for tf, tid in self.up_token_ids.items():
+            if tid == token_id:
+                self.up_books.setdefault(tf, TokenBook()).apply_levels_batch(changes)
+                return
+        for tf, tid in self.down_token_ids.items():
+            if tid == token_id:
+                self.down_books.setdefault(tf, TokenBook()).apply_levels_batch(changes)
                 return
 
     def set_token_ids(self, timeframe: str, up_id: str, down_id: str):
-        # Reset books when tokens change — new tokens have a fresh order book
+        """Set token IDs and reset the timeframe's books when tokens change."""
         old_up = self.up_token_ids.get(timeframe)
         old_down = self.down_token_ids.get(timeframe)
         if up_id != old_up:
-            self.up_book.reset()
+            self.up_books[timeframe] = TokenBook()
         if down_id != old_down:
-            self.down_book.reset()
+            self.down_books[timeframe] = TokenBook()
         self.up_token_ids[timeframe] = up_id
         self.down_token_ids[timeframe] = down_id
 
@@ -234,4 +335,14 @@ class MarketState:
             all_ids = state.get_all_token_ids()
             if token_id in all_ids:
                 state.update_book_level(token_id, side, price, size)
+                return
+
+    def update_book_levels_batch(
+        self, token_id: str, changes: list[tuple[str, float, float]]
+    ):
+        """Route a batch of level changes to the correct asset by token ID."""
+        for state in self._states.values():
+            all_ids = state.get_all_token_ids()
+            if token_id in all_ids:
+                state.update_book_levels_batch(token_id, changes)
                 return
